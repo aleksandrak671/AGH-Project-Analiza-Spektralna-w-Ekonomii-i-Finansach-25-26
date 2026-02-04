@@ -1,0 +1,1 @@
+# AGH-Project-Analiza-Spektralna-w-Ekonomii-i-Finansach-2025-2026
