@@ -1,0 +1,664 @@
+---
+title: 'Projekt zaliczeniowy: ANALIZA SPEKTRALNA W EKONOMII I FINANSACH'
+author: "Aleksandra Konopelska"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Wstęp
+
+Celem mojego projektu jest analiza spektralna rzeczywistego szeregu czasowego, służąca identyfikacji ukrytej cykliczności i sezonowości. 
+
+
+## Opis danych (Case Study)
+
+Do analizy wybrałam **Miesięczny Indeks Produkcji Przemysłowej w Polsce**. 
+
+* **Źródło:** Baza FRED (seria:  `POLPROINDMISMEI`).
+* **Okres:** Styczeń 2000 – obecnie.   
+* **Charakterystyka:** Szereg wykazuje silną sezonowość roczną oraz wyraźny trend wzrostowy.  
+
+
+## Uzasadnienie przygotowania danych
+
+Analiza spektralna wymaga stacjonarności szeregu. Surowe dane przekształciłam w następujący sposób:
+
+1. **Logarytmizacja:** zastosowałam ją w celu stabilizacji wariancji (ponieważ amplituda wahań sezonowych rosła wraz z upływem czasu).
+2. **Detrendyzacja:** usunęłam tylko trend liniowy, zachowując sezonowość, której obecność zweryfikuję w analizie spektralnej. 
+
+
+## Pakiety
+
+Pakiety, które wykorzystuję w projekcie:
+```{r}
+library(quantmod)
+library(lomb)
+```
+
+
+# Wczytanie i przygotowanie danych
+
+```{r}
+# pobranie danych z bazy FRED (indeks produkcji przemysłowej, Polska)
+dane_fred <- getSymbols("POLPROINDMISMEI", src = "FRED", 
+                        auto.assign = FALSE)
+dane_zakres <- dane_fred["2000-01-01/"]
+
+# usunięcie ewentualnych braków danych
+dane_czyste <- na.omit(dane_zakres)
+
+# konwersja na obiekt szeregu czasowego
+# frequency = 12 (dane miesięczne)
+produkcja_ts <- ts(as.numeric(dane_czyste), 
+                   start = c(2000, 1), 
+                   frequency = 12)
+
+```
+
+
+## Transformacja do stacjonarności
+
+Szereg surowy jest niestacjonarny:  posiada wyraźny trend wzrostowy oraz zmieniającą się wariancję.  Aby spełnić wymogi analizy spektralnej, wykonałam następujące transformacje:   
+
+* **Logarytmizacja:** stabilizacja wariancji (przekształcenie modelu multiplikatywnego na addytywny).
+* **Detrendyzacja:** usunęłam trend liniowy metodą najmniejszych kwadratów, dopasowując prostą do danych i wykorzystując reszty z regresji jako szereg stacjonarny. 
+
+```{r}
+# logarytmizacja (stabilizacja wariancji)
+produkcja_log <- log(produkcja_ts)
+
+# detrendyzacja (usunięcie trendu)
+czas_indeks <- time(produkcja_log)
+
+# dopasowanie modelu liniowego trendu
+model_liniowy <- lm(produkcja_log ~ czas_indeks)
+
+# wyznaczenie reszt (szereg scentrowany, pozbawiony trendu)
+dane_scentrowane <- residuals(model_liniowy)
+
+# przywrócenie atrybutów szeregu czasowego dla reszt
+dane_scentrowane_ts <- ts(dane_scentrowane, 
+                          start = c(2000, 1), 
+                          frequency = 12)
+
+```
+
+```{r}
+# wykres danych po transformacji
+plot(dane_scentrowane_ts, 
+     main = "Szereg scentrowany (po logarytmizacji i detrendyzacji)", 
+     ylab = "Odchylenie od trendu", col = "darkgreen", lwd = 1)
+abline(h = 0, col = "black")
+grid()
+
+```
+
+Po logarytmizacji i detrendyzacji szereg oscyluje wokół zera, co wskazuje na usunięcie trendu i uzyskanie stałej średniej w czasie. Widoczne wahania cykliczne sugerują sezonowość, która zostanie zidentyfikowana w analizie periodogramu.
+
+
+# Zadanie 1: Analiza podstawowa
+
+## DFT oraz periodogram: dane oryginalne vs scentrowane
+
+W pierwszym kroku wyznaczam dyskretną transformatę Fouriera (DFT) dla danych oryginalnych oraz dla danych po detrendyzacji (scentrowanych). Następnie porównuję periodogramy naiwne, aby ocenić wpływ trendu na estymację widma.
+
+
+```{r fig.width=7, fig.height=8}
+# DFT – dane oryginalne i scentrowane
+dft_orig <- fft(as.numeric(produkcja_ts))
+dft_ctr  <- fft(as.numeric(dane_scentrowane_ts))
+
+par(mfrow = c(2, 1))
+
+plot(Mod(dft_orig)[1:(length(dft_orig)/2)], type = "l",
+     main = "Moduł DFT – dane oryginalne",
+     xlab = "Indeks częstotliwości",
+     ylab = "|DFT|")
+grid()
+
+plot(Mod(dft_ctr)[1:(length(dft_ctr)/2)], type = "l",
+     main = "Moduł DFT – dane scentrowane",
+     xlab = "Indeks częstotliwości",
+     ylab = "|DFT|")
+grid()
+
+par(mfrow = c(1, 1))
+```
+
+
+Dla danych oryginalnych moduł DFT jest zdominowany przez niskie częstotliwości związane z trendem. Po detrendyzacji i scentrowaniu wpływ tej składowej maleje, a widmo staje się czytelniejsze. Potwierdza to zasadność przygotowania danych do analizy spektralnej.
+
+## Periodogram naiwny – dane oryginalne vs scentrowane
+
+Ponieważ analizowany szereg jest miesięczny (`frequency = 12`), częstotliwość na wykresach interpretuję jako **cykle na rok** (np. 1 oznacza cykl roczny, a 0.5 oznacza cykl dwuletni).
+
+```{r fig.width=7, fig.height=8}
+par(mfrow = c(2, 1))
+
+# periodogramy liczone bez rysowania
+spec_oryginalne <- spec.pgram(produkcja_ts, 
+                              taper = 0, 
+                              log = "no", 
+                              plot = FALSE)
+
+spec_scentrowane <- spec.pgram(dane_scentrowane_ts, 
+                               taper = 0, 
+                               log = "no", 
+                               plot = FALSE)
+
+# zakres częstotliwości (0–1 cykl/rok)
+xmax <- 1
+
+# dane oryginalne
+idx1 <- spec_oryginalne$freq <= xmax
+plot(spec_oryginalne$freq[idx1], spec_oryginalne$spec[idx1],
+     type = "l",
+     col = "darkblue",
+     main = "Periodogram: dane oryginalne (surowe, z trendem)",
+     xlab = "Częstotliwość [cykle/rok]",
+     ylab = "Moc widmowa")
+grid()
+
+# dane scentrowane
+idx2 <- spec_scentrowane$freq <= xmax
+plot(spec_scentrowane$freq[idx2], spec_scentrowane$spec[idx2],
+     type = "l",
+     col = "darkred",
+     main = "Periodogram: dane scentrowane (po detrendyzacji)",
+     xlab = "Częstotliwość [cykle/rok]",
+     ylab = "Moc widmowa")
+grid()
+
+par(mfrow = c(1, 1))
+
+```
+
+Na periodogramie danych oryginalnych największa moc jest przy częstotliwościach bliskich zeru. Wynika to z trendu i zmian długookresowych, przez co pozostałe częstotliwości są mniej widoczne.
+
+Po detrendyzacji wpływ trendu jest mniejszy, więc widmo jest czytelniejsze. Pojawiają się lokalne piki, które wskazują na obecność wahań cyklicznych/sezonowych w danych miesięcznych.
+
+
+## Eksperyment z liczbą N (wyciek widma)
+
+### Dane oryginalne
+
+Zgodnie z instrukcją, najpierw przeprowadzam eksperyment na danych oryginalnych (z trendem).
+
+```{r}
+# naturalny okres dla danych miesięcznych z sezonowością roczną
+okres <- 12
+
+N_podzielne <- 240  # 20 pełnych lat
+N_niepodzielne <- 230  # niepodzielne przez 12
+
+# wycinam odpowiednie fragmenty szeregu ORYGINALNEGO
+dane_N_podzielne_orig <- window(produkcja_ts, 
+                                start = c(2000, 1), 
+                                end = c(2000 + (N_podzielne - 1) %/% 12, 
+                                       ((N_podzielne - 1) %% 12) + 1))
+
+dane_N_niepodzielne_orig <- window(produkcja_ts, 
+                                   start = c(2000, 1), 
+                                   end = c(2000 + (N_niepodzielne - 1) %/% 12, 
+                                          ((N_niepodzielne - 1) %% 12) + 1))
+
+```
+
+```{r fig.width=7, fig.height=8}
+# porównanie periodogramów dla danych oryginalnych
+par(mfrow = c(2, 1))
+
+spec.pgram(dane_N_podzielne_orig, 
+           taper = 0, 
+           pad = 0, fast = FALSE,
+           log = "no",
+           main = paste0("Periodogram (dane oryginalne): N = ", 
+                         length(dane_N_podzielne_orig), 
+                         " (podzielne przez 12)"),
+           col = "blue")
+
+spec.pgram(dane_N_niepodzielne_orig, 
+           taper = 0, 
+           pad = 0, fast = FALSE,
+           log = "no",
+           main = paste0("Periodogram (dane oryginalne): N = ", 
+                         length(dane_N_niepodzielne_orig), 
+                         " (NIEpodzielne przez 12)"),
+           col = "red")
+
+par(mfrow = c(1, 1))
+```
+
+
+Dla danych oryginalnych oba periodogramy (N = 240 i N = 230) są bardzo podobne i silnie zdominowane przez bardzo niskie częstotliwości związane z trendem. W efekcie ewentualny wyciek widma wynikający z (nie)podzielności N przez 12 jest na tych wykresach słabo widoczny. Dlatego, aby ocenić ten efekt, analizę powtarzam na danych po detrendyzacji.
+
+### Dane scentrowane (po detrendyzacji)
+
+Aby lepiej uwidocznić efekt wycieku widma związany z sezonowością roczną, przeprowadzam ten sam eksperyment na danych po detrendyzacji.
+
+```{r}
+# wycinam odpowiednie fragmenty szeregu SCENTROWANEGO
+dane_N_podzielne <- window(dane_scentrowane_ts, 
+                            start = c(2000, 1), 
+                            end = c(2000 + (N_podzielne - 1) %/% 12, 
+                                   ((N_podzielne - 1) %% 12) + 1))
+
+dane_N_niepodzielne <- window(dane_scentrowane_ts, 
+                               start = c(2000, 1), 
+                               end = c(2000 + (N_niepodzielne - 1) %/% 12, 
+                                      ((N_niepodzielne - 1) %% 12) + 1))
+```
+
+
+```{r fig.width=7, fig.height=8}
+# porównanie periodogramów dla danych scentrowanych
+par(mfrow = c(2, 1))
+
+spec.pgram(dane_N_podzielne, 
+           taper = 0, 
+           pad = 0, fast = FALSE,
+           log = "no",
+           xlim = c(0, 1),
+           main = paste0("Periodogram (dane scentrowane): N = ", 
+                         length(dane_N_podzielne), 
+                         " (podzielne przez 12)"),
+           col = "blue")
+
+spec.pgram(dane_N_niepodzielne, 
+           taper = 0, 
+           pad = 0, fast = FALSE,
+           log = "no",
+           xlim = c(0, 1),
+           main = paste0("Periodogram (dane scentrowane): N = ", 
+                         length(dane_N_niepodzielne), 
+                         " (NIEpodzielne przez 12)"),
+           col = "red")
+
+par(mfrow = c(1, 1))
+```
+
+Po zawężeniu zakresu do 0–1 widać, że dla danych scentrowanych większość mocy nadal skupia się przy bardzo niskich częstotliwościach (blisko 0), co wskazuje na dominację wahań długookresowych.
+
+Porównanie długości próby sugeruje subtelny efekt wycieku widma:
+
+ - dla N = 240 (podzielne przez 12) widmo jest nieco bardziej „uporządkowane” (energia bardziej skupiona),
+ - dla N = 230 (niepodzielne przez 12) moc jest minimalnie bardziej rozproszona między sąsiednimi częstotliwościami.
+
+Różnice są niewielkie, co jest typowe dla rzeczywistych danych ekonomicznych (szum i nieregularne cykle).
+
+# Zadanie 2: Porównanie metod estymacji
+
+## Periodogram naiwny + 95% przedział ufności
+
+Ponieważ szereg jest miesięczny (`frequency = 12`), częstotliwość na osi X interpretuję jako liczbę cykli w ciągu roku; na wykresie pokazano zakres 0–1 cykl/rok.
+
+```{r}
+# periodogram naiwny (bez wygładzania)
+# plot = FALSE -> wykres razem z przedziałem ufności
+spec_naiwny <- spec.pgram(dane_scentrowane_ts, taper = 0, log = "no", plot = FALSE)
+
+# 95% przedział ufności (rozkład chi-kwadrat z 2 stopniami swobody)
+alpha <- 0.05
+lower_ci <- spec_naiwny$spec * qchisq(alpha / 2, df = 2) / 2
+upper_ci <- spec_naiwny$spec * qchisq(1 - alpha / 2, df = 2) / 2
+
+# wykres periodogramu z 95% CI
+idx <- spec_naiwny$freq > 0 & spec_naiwny$freq <= 1
+
+plot(spec_naiwny$freq[idx], spec_naiwny$spec[idx],
+     type = "l", col = "gray40", lwd = 1,
+     log = "y",
+     main = "Periodogram naiwny z 95% przedziałem ufności (0–1 cykl/rok)",
+     xlab = "Częstotliwość [cykle/rok]",
+     ylab = "Moc widmowa")
+
+lines(spec_naiwny$freq[idx], lower_ci[idx], col = "blue", lty = 2)
+lines(spec_naiwny$freq[idx], upper_ci[idx], col = "blue", lty = 2)
+grid()
+```
+
+Periodogram naiwny, wyznaczony bez wygładzania (`taper = 0`), pokazuje jak moc sygnału rozkłada się w zależności od częstotliwości dla szeregu scentrowanego. Na wykresie dominuje bardzo niska częstotliwość, co oznacza, że w danych przeważają wahania długookresowe.
+
+Widoczne są również lokalne wzrosty mocy przy wyższych częstotliwościach, które mogą świadczyć o obecności cykliczności w danych. Ze względu na dużą zmienność (poszarpanie) periodogramu naiwnego oraz szeroki punktowy 95% przedział ufności, interpretacja tych pików nie jest jednoznaczna. Dlatego w dalszej części analizy zastosowane zostaną metody wygładzania widma (Daniell, uśrednianie podokresów, Welch).
+
+
+## Metoda Daniella (wygładzanie oknem)
+
+Stosuję wygładzanie oknem Daniella, które działa jak średnia ruchoma w dziedzinie częstotliwości.  
+
+```{r}
+par(mfrow = c(2, 1))
+
+# okno jednopoziomowe (spans = 3)
+spec_daniell_1 <- spec.pgram(dane_scentrowane_ts, 
+                              spans = 3, 
+                              taper = 0, 
+                              log = "no",
+                              main = "Daniell:  okno jednopoziomowe (spans = 3)",
+                              col = "red")
+
+# okno wielopoziomowe (spans = c(3, 3))
+spec_daniell_2 <- spec.pgram(dane_scentrowane_ts, 
+                              spans = c(3, 3), 
+                              taper = 0, 
+                              log = "no",
+                              main = "Daniell: okno wielopoziomowe (spans = c(3,3))",
+                              col = "darkred")
+
+par(mfrow = c(1, 1))
+
+```
+
+Wygładzanie oknem Daniella zmniejsza "poszarpanie” periodogramu, czyli redukuje wariancję estymatora. Dzięki temu widmo jest łatwiejsze do interpretacji, bo pojedyncze losowe skoki są mniej widoczne.
+
+Dla okna jednopoziomowego (spans = 3) wygładzenie jest umiarkowane –> część pików nadal jest zachowana, ale wykres jest już stabilniejszy niż periodogram naiwny. Przy oknie wielopoziomowym (spans = c(3,3)) wygładzenie jest silniejsze: widmo jest wyraźnie gładsze, ale kosztem rozdzielczości –> piki stają się szersze i mniej ostre. 
+
+
+## Metoda manualna (uśrednianie podokresów)
+
+Dzielę szereg na rozłączne podokresy, wyznaczam periodogram dla każdego z nich, a następnie uśredniam wyniki.
+
+```{r}
+# liczba podokresów
+K <- 5
+
+# długość jednego podokresu
+N_sub <- floor(length(dane_scentrowane_ts) / K)
+
+# macierz na periodogramy
+freq_sub <- NULL
+spec_matrix <- NULL
+
+for (i in 1:K) {
+  # wycinam i-ty podokres
+  start_idx <- (i - 1) * N_sub + 1
+  end_idx <- i * N_sub
+  podokres <- dane_scentrowane_ts[start_idx: end_idx]
+  
+  # periodogram dla podokresu
+  spec_i <- spec.pgram(ts(podokres, frequency = 12), 
+                       taper = 0, 
+                       plot = FALSE)
+  
+  if (is.null(freq_sub)) {
+    freq_sub <- spec_i$freq
+    spec_matrix <- matrix(0, nrow = length(freq_sub), ncol = K)
+  }
+  
+  spec_matrix[, i] <- spec_i$spec
+}
+
+# uśrednienie periodogramów
+spec_manualny <- rowMeans(spec_matrix)
+```
+
+```{r}
+# wykres periodogramu manualnego
+plot(freq_sub, spec_manualny, 
+     type = "l", 
+     col = "red", 
+     lwd = 2,
+     main = paste0("Periodogram manualny (uśrednienie ", K, " podokresów)"),
+     xlab = "Częstotliwość", 
+     ylab = "Moc widmowa")
+grid()
+```
+
+W metodzie manualnej dzielę szereg na K = 5 rozłącznych fragmentów, liczę periodogram dla każdego z nich, a następnie uśredniam wyniki. Takie uśrednianie zmniejsza wariancję estymatora, dlatego wykres jest wyraźnie gładszy niż periodogram naiwny i łatwiej wskazać ogólny kształt widma.
+
+Kosztem tej stabilizacji jest mniejsza rozdzielczość częstotliwościowa, ponieważ każdy podokres ma krótszą długość (N_sub obserwacji). W praktyce oznacza to, że piki mogą być mniej ostre i trudniej rozróżnić częstotliwości, które leżą blisko siebie.
+
+
+## Metoda Welcha
+
+Metoda Welcha dzieli szereg na nachodzące segmenty, a następnie uśrednia ich periodogramy. 
+
+```{r}
+# metoda Welcha (segmenty z nakładaniem)
+segment_length <- 64
+overlap <- 0.5
+
+n_total <- length(dane_scentrowane_ts)
+step <- floor(segment_length * (1 - overlap))
+n_segments <- floor((n_total - segment_length) / step) + 1
+
+welch_spec <- NULL
+welch_freq <- NULL
+
+# implementacja manualna metody Welcha (alternatywa dla funkcji pwelch z pakietu oce)
+# pozwala na dokładną kontrolę nad segmentami i nakładaniem (overlap)
+for (i in 1:n_segments) {
+  start_idx <- (i - 1) * step + 1
+  end_idx <- start_idx + segment_length - 1
+  
+  if (end_idx <= n_total) {
+    segment <- dane_scentrowane_ts[start_idx:end_idx]
+    
+    spec_w <- spec.pgram(ts(segment, frequency = 12), 
+                         taper = 0, 
+                         plot = FALSE)
+    
+    if (is.null(welch_spec)) {
+      welch_freq <- spec_w$freq
+      welch_spec <- spec_w$spec
+    } else {
+      welch_spec <- welch_spec + spec_w$spec
+    }
+  }
+}
+
+welch_spec <- welch_spec / n_segments
+
+plot(welch_freq, welch_spec, 
+     type = "l", col = "blue", lwd = 2,
+     main = "Periodogram Welcha (segmenty z 50% nakładaniem)",
+     xlab = "Częstotliwość", ylab = "Moc widmowa")
+grid()
+```
+
+Metoda Welcha (segmenty z 50% nakładaniem) daje gładsze i bardziej stabilne oszacowanie widma niż periodogram naiwny, ponieważ uśrednia wyniki z wielu fragmentów szeregu.
+
+Na wykresie największa moc występuje dla niskich częstotliwości, co oznacza, że w danych dominują wahania długookresowe. Dla wyższych częstotliwości moc jest dużo mniejsza, więc krótkookresowe wahania mają relatywnie niewielki udział w całkowitej zmienności szeregu.
+
+
+## Wykres zbiorczy: porównanie wszystkich metod
+
+```{r}
+# baza (wspólna siatka częstotliwości)
+base <- spec.pgram(dane_scentrowane_ts, taper = 0, plot = FALSE)
+xmax <- 1
+idx <- base$freq <= xmax
+f_grid <- base$freq[idx]
+
+# funkcja interpolacji na wspólną siatkę
+interp_spec <- function(freq, spec, f_grid) {
+  approx(x = freq, y = spec, xout = f_grid, rule = 2)$y
+}
+
+# widma na wspólnej siatce
+spec_naive <- base$spec[idx]
+spec_d1 <- interp_spec(spec_daniell_1$freq, spec_daniell_1$spec, f_grid)
+spec_d2 <- interp_spec(spec_daniell_2$freq, spec_daniell_2$spec, f_grid)
+spec_man <- interp_spec(freq_sub, spec_manualny, f_grid)
+spec_wel <- interp_spec(welch_freq, welch_spec, f_grid)
+
+# wykres
+plot(f_grid, spec_naive, type="l", col="gray60", lwd=1,
+     main="Porównanie metod estymacji widma (0–1 cykl/rok)",
+     xlab = "Częstotliwość [cykle/rok]", ylab="Moc widmowa",
+     xlim=c(0,1))
+
+lines(f_grid, spec_d1, col="red", lwd=2)
+lines(f_grid, spec_d2, col="darkred", lwd=2)
+lines(f_grid, spec_man, col="purple", lwd=2)
+lines(f_grid, spec_wel, col="blue", lwd=2)
+
+legend("topright",
+       legend=c("Naiwny", "Daniell (3)", "Daniell (3,3)", "Manualny (5)", "Welch"),
+       col=c("gray60","red","darkred","purple","blue"),
+       lwd=c(1,2,2,2,2), cex=0.85)
+
+grid()
+```
+
+Na wykresie zbiorczym porównano estymatory widma w zakresie 0–1 cykl/rok. Aby porównanie było bezpośrednie, wszystkie widma zostały przedstawione na wspólnej siatce częstotliwości (interpolacja do częstotliwości z periodogramu naiwnego).
+
+Wyniki pokazują typowy kompromis między wariancją a rozdzielczością. Periodogram naiwny ma największą wariancję (jest najbardziej "poszarpany” i ma ostre piki). Metody wygładzające i uśredniające (Daniell, manualna, Welch) dają znacznie gładsze krzywe, ale spłaszczają i poszerzają piki. Welch stanowi dobry kompromis, ponieważ dzięki nakładaniu segmentów redukuje wariancję bez tak silnej utraty rozdzielczości jak najsilniej wygładzony Daniell.
+
+## Najsilniejsze piki widma (Daniell 3,3)
+
+```{r}
+# widmo z Daniell(3,3)
+freq <- spec_daniell_2$freq
+spec <- spec_daniell_2$spec
+
+# pomijam freq=0 (składowa stała)
+idx <- which(freq > 0)
+freq <- freq[idx]
+spec <- spec[idx]
+
+# wybór top pików
+top <- 10
+ord <- order(spec, decreasing = TRUE)[1:top]
+
+tab_piki <- data.frame(
+  czestotliwosc_cykle_na_rok = freq[ord],
+  okres_lata = 1 / freq[ord],
+  okres_mies = 12 / freq[ord],
+  moc = spec[ord]
+)
+
+knitr::kable(
+  tab_piki,
+  digits = 4,
+  caption = "Najsilniejsze piki widma (estymator Daniella (3,3))"
+)
+```
+
+Najsilniejsze piki widma pojawiają się przy bardzo niskich częstotliwościach (0.04–0.16 cyklu/rok), co odpowiada okresom 6–25 lat i wskazuje na dominację wahań długookresowych. Dodatkowo widoczne są słabsze cykle 3–5 letnie (0.20–0.36 cyklu/rok). Wygładzone widmo nie pokazuje dominującego piku przy 1 cyklu/rok, więc sezonowość roczna nie jest tu najsilniejszą składową.
+
+
+# Zadanie 3: Analiza danych niekompletnych
+
+## Symulacja braków danych
+
+```{r}
+# ustawienie ziarna dla powtarzalności
+set.seed(123)
+
+# liczba obserwacji do usunięcia (30%)
+N_total <- length(dane_scentrowane_ts)
+N_usun <- round(0.3 * N_total)
+
+# losowe indeksy do usunięcia
+indeksy_usun <- sample(1:N_total, N_usun)
+
+# tworzenie wektora czasu (pełnego)
+czas_pelny <- time(dane_scentrowane_ts)
+
+# dane z brakami
+indeksy_zachowane <- setdiff(1:N_total, indeksy_usun)
+czas_braki <- czas_pelny[indeksy_zachowane]
+dane_braki <- as.numeric(dane_scentrowane_ts)[indeksy_zachowane]
+```
+
+Usunięto losowo około 30% obserwacji (dokładnie:  `r N_usun`, czyli `r round(100 * N_usun / N_total, 1)`%).
+
+## Periodogram naiwny na danych z brakami
+
+Standardowe FFT wymaga równomiernie rozłożonych obserwacji w czasie.  Dla danych z brakami stosuję interpolację liniową, aby wypełnić luki. 
+
+```{r}
+# interpolacja liniowa dla brakujących wartości
+dane_interpolowane <- approx(czas_braki, dane_braki, 
+                              xout = czas_pelny, 
+                              method = "linear")$y
+
+# usunięcie NA z brzegów (jeśli są)
+dane_interpolowane[is.na(dane_interpolowane)] <- 0
+
+# periodogram naiwny na danych interpolowanych
+dane_interp_ts <- ts(dane_interpolowane, start = c(2000, 1), frequency = 12)
+
+spec_braki_naiwny <- spec.pgram(dane_interp_ts, 
+                                 taper = 0, 
+                                 log = "no",
+                                 main = "Periodogram naiwny (dane z brakami, interpolacja)",
+                                 col = "orange")
+```
+
+Ponieważ klasyczna FFT wymaga równych odstępów czasu, brakujące obserwacje uzupełniłam interpolacją liniową, aby móc policzyć periodogram naiwny. Otrzymane widmo nadal pokazuje dominację niskich częstotliwości, ale należy je interpretować ostrożnie.
+
+Interpolacja "wygładza" przebieg szeregu i może sztucznie zmniejszać zmienność krótkookresową, a także wprowadzać dodatkowe zniekształcenia widma (artefakty), zwłaszcza przy wyższych częstotliwościach. Dlatego w kolejnym kroku wykorzystuję periodogram Lomba–Scargle’a, który działa bezpośrednio na danych z brakami i nie wymaga interpolacji.
+
+## Periodogram Lomba-Scargle'a
+
+Metoda Lomba-Scargle'a jest przeznaczona do analizy szeregów z nierównomiernymi odstępami czasowymi.  Nie wymaga interpolacji: dopasowuje funkcje sinusoidalne bezpośrednio do dostępnych danych.  
+
+```{r}
+# periodogram Lomba-Scargle'a
+czas_num <- as.numeric(czas_braki)
+
+# obliczenie periodogramu LS
+lomb_wynik <- lsp(dane_braki, 
+                  times = czas_num, 
+                  type = "period",
+                  ofac = 4,
+                  plot = FALSE)
+
+# wykres z linią istotności 5%
+plot(lomb_wynik$scanned, lomb_wynik$power, 
+     type = "l", 
+     col = "darkblue", 
+     lwd = 1.5,
+     main = "Periodogram Lomba-Scargle'a (dane z 30% brakami)",
+     xlab = "Okres [lata]", 
+     ylab = "Moc znormalizowana")
+
+# linia istotności statystycznej (poziom 5%)
+prog_istotnosci <- lomb_wynik$sig.level
+abline(h = prog_istotnosci, col = "red", lty = 2, lwd = 2)
+
+# dodanie etykiety
+text(x = max(lomb_wynik$scanned) * 0.8, 
+     y = prog_istotnosci * 1.1, 
+     labels = "Poziom istotności 5%", 
+     col = "red", 
+     cex = 0.8)
+
+grid()
+```
+
+**Wnioski z analizy danych niekompletnych:**
+
+1. **Periodogram naiwny** wymaga równych odstępów czasu, dlatego do wyznaczenia widma konieczna była interpolacja braków. Taki zabieg może zniekształcać widmo (szczególnie dla wyższych częstotliwości), więc wynik należy traktować ostrożnie.
+
+2. **Periodogram Lomba–Scargle’a** można wyznaczyć bezpośrednio na danych z brakami, ponieważ metoda uwzględnia nieregularne odstępy czasowe i nie wymaga uzupełniania luk.
+
+3. Na powyższym wykresie Lomba–Scargle’a część maksimów przekracza linię istotności 5%, co oznacza statystycznie istotną cykliczność w danych mimo usunięcia ok. 30% obserwacji. Najsilniejsze składowe widoczne są dla dłuższych okresów (wieluletnich), co sugeruje obecność wahań długookresowych.
+
+**Wniosek:** przy brakach danych periodogram Lomba–Scargle’a jest bardziej wiarygodny niż klasyczny periodogram oparty na FFT, ponieważ nie wymaga interpolacji i jest odporny na nieregularność próbkowania.
+
+
+
+# Podsumowanie
+
+Przeprowadzona analiza spektralna Miesięcznego Indeksu Produkcji Przemysłowej w Polsce pozwoliła na sformułowanie następujących wniosków ogólnych:
+
+1. **Charakterystyka widma:** analizowany szereg, po sprowadzeniu do stacjonarności, wykazuje obecność cykli sezonowych oraz przede wszystkim wahań długookresowych. W widmie wygładzonym dominują niskie częstotliwości, sugerujące cykle wieloletnie.
+
+
+2.  **Dobór metod estymacji:** porównanie estymatorów pokazało klasyczny kompromis między obciążeniem a wariancją. Periodogram naiwny, choć precyzyjny, charakteryzuje się zbyt dużym "szumem". Zastosowanie metod wygładzania (szczególnie metody Welcha oraz okna Daniella) pozwoliło na uzyskanie stabilniejszego obrazu widma, co ułatwia interpretację kluczowych cykli koniunkturalnych i sezonowych. Na podstawie tabeli najsilniejszych pików (Daniell (3,3)) łatwiej zidentyfikować dominujące składowe niskoczęstotliwościowe, odpowiadające wahaniom wieloletnim oraz słabszym cyklom około 3–5-letnim.
+
+
+3.  **Odporność na braki danych:** eksperyment z usunięciem 30% obserwacji wykazał przewagę metody Lomba-Scargle'a nad klasycznym FFT z interpolacją. Metoda ta skutecznie zidentyfikowała istotne statystycznie cykle mimo znacznych ubytków w danych, co czyni ją użytecznym narzędziem w analizie rzeczywistych, często niekompletnych danych ekonomicznych.
+
+
+
