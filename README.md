@@ -1,4 +1,5 @@
-# AGH-Project-Analiza-Spektralna-w-Ekonomii-i-Finansach-2025/2026 (Spectral Analysis of Time Series in R)
+# AGH-Project-Analiza-Spektralna-w-Ekonomii-i-Finansach-2025/2026 
+### Spectral Analysis of Time Series in R
 
 Final project for the course **Spectral Analysis in Economics and Finance**.
 
